@@ -1,1 +1,0 @@
-# UEModel Specifications

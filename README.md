@@ -1,16 +1,34 @@
 <div align="center">
 
-# UEFormat
+# UEFormat Blender Plugin
 
-A model and animation export format created for Unreal Engine game asset extraction. The export format is currently supported by [FortnitePorting](https://github.com/h4lfheart/FortnitePorting), [FModel](https://github.com/4sval/FModel) and [CUE4Parse](https://github.com/FabianFG/CUE4Parse).
+[![Blender](https://img.shields.io/badge/Blender-3.2--3.6-blue?logo=blender&logoColor=white&color=orange)](https://www.blender.org/download/)
 
 </div>
 
-## Plugins
-- [Blender](https://github.com/h4lfheart/UEFormat/tree/blender)
-- [Unreal Engine](https://github.com/h4lfheart/UEFormat/tree/unreal)
+## Features
+### Model Data (.uemodel)
+- LOD Models (Level of Detail)
+- Vertices
+- Indices
+- Normals
+- Texture Coordinates
+- Vertex Colors
+- Materials
+- Weights
+- Bones
+- Sockets
+- Morph Targets
+- Collision Geometry (Convex Only)
+- Virtual Bones
 
-## Format Specification
-- [Generic](https://github.com/h4lfheart/UEFormat/tree/master/docs/generic.md)
-- [UEModel](https://github.com/h4lfheart/UEFormat/tree/master/docs/uemodel.md)
-- [UEAnim](https://github.com/h4lfheart/UEFormat/tree/master/docs/ueanim.md)
+### Animation Data (.ueanim)
+- Location Keys
+- Rotation Keys
+- Scale Keys
+- Float Keys
+    - Shape Key Animation
+
+### Pose Data (.uepose)
+- Shape Keys From Bone Influences
+- Shape Keys From Curves

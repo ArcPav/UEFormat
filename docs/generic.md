@@ -1,2 +1,0 @@
-# UEFormat Specifications
-
