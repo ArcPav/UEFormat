@@ -40,6 +40,13 @@ class UEModelOptions(UEFormatOptions):
     target_lod: int = 0
     allowed_reorient_children: dict = None
 
+    attach_main: bool = False
+    attach_skeleton: str = "AUTO"
+    attach_root_bone: str = "position"
+    attach_target_bone: str = "auto"
+    attach_copy_location: bool = True
+    attach_copy_rotation: bool = False
+
 
 @dataclass(slots=True)
 class UEAnimOptions(UEFormatOptions):

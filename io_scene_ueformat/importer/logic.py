@@ -13,19 +13,16 @@ from bpy_extras import anim_utils
 from mathutils import Matrix, Quaternion, Vector
 from math import *
 
-from ..importer.classes import (
-    MAGIC, MODEL_IDENTIFIER,
-    POSE_IDENTIFIER, ANIM_IDENTIFIER,
-    Bone, ConvexCollision,
-    EUEFormatVersion, Material,
-    MorphTarget, Socket, UEAnim,
-    UEModel, UEModelLOD,
-    UEModelSkeleton, VertexColor,
-    Weight, UEPose,
-    Curve, FloatKey
-)
-from ..importer.reader import FArchiveReader
-from ..importer.utils import *
+from .constants import MAGIC, MODEL_IDENTIFIER, POSE_IDENTIFIER, ANIM_IDENTIFIER
+from .version import EUEFormatVersion
+from .archive.reader import FArchiveReader
+from .space import to_blender_space
+from .dto.model import ModelDto
+from .dto.anim import AnimDto, CurveDto as Curve, FloatKeyDto as FloatKey
+from .dto.pose import PoseDto
+from .reorient_utils import reorient_bones
+from .ab_json import extract_ab_target_bones, find_matching_ab_json
+from .utils import *
 from ..logging import Log
 from ..options import UEAnimOptions, UEFormatOptions, UEModelOptions, UEPoseOptions
 
@@ -245,9 +242,74 @@ class UEFormatImport:
         material.use_backface_culling = False
         material.show_transparent_back = False
 
+    def _apply_attach_main(self, armature_object: bpy.types.Object, file_path: Path | None) -> None:
+        if not file_path:
+            Log.warn("Unable to locate *AB.json")
+            return
 
-    def import_file(self, path: str | Path) -> Object | Action:
+        ab_path = find_matching_ab_json(file_path)
+        if ab_path is None:
+            Log.warn(f"No matching *AB.json found")
+            return
+
+        _, target_bones = extract_ab_target_bones(ab_path)
+
+        skeleton_choice = getattr(self.options, "attach_skeleton", "AUTO") or "AUTO"
+        target_armature = None
+        if skeleton_choice != "AUTO":
+            target_armature = bpy.data.objects.get(skeleton_choice)
+        if target_armature is None:
+            candidates = [o for o in bpy.data.objects if o.type == "ARMATURE" and o is not armature_object]
+            target_armature = candidates[0] if candidates else None
+        if target_armature is None:
+            Log.warn("No Skeleton Found")
+            return
+
+        target_bone_name = (getattr(self.options, "attach_target_bone", "") or "").strip()
+        if target_bone_name.lower() == "auto":
+            target_bone_name = ""
+
+        if target_bone_name and target_bone_name not in target_armature.data.bones:
+            Log.warn(f"Attach Main: Manually specified {target_bone_name} do not exist, Back Auto")
+            target_bone_name = ""
+
+        if not target_bone_name:
+            target_bone_name = next((b for b in target_bones if b in target_armature.data.bones), None)
+
+        if not target_bone_name:
+            Log.warn(f"Attach Main: {target_armature.name} Can't find {ab_path.name} Specify bone")
+            return
+
+        root_bone_name = getattr(self.options, "attach_root_bone", "") or "position"
+        root_bone = get_case_insensitive(armature_object.pose.bones, root_bone_name)
+        if root_bone is None:
+            Log.warn(f"Attach Main: No {armature_object.name} bone, Revert to {root_bone_name}")
+            root_bone = next(iter(armature_object.pose.bones), None)
+        if root_bone is None:
+            Log.warn(f"Attach Main: {armature_object.name} No bones to mount.")
+            return
+
+        copy_location = bool(getattr(self.options, "attach_copy_location", True))
+        copy_rotation = bool(getattr(self.options, "attach_copy_rotation", False))
+
+        if copy_location:
+            constraint = cast(bpy.types.CopyLocationConstraint, root_bone.constraints.new("COPY_LOCATION"))
+            constraint.target = target_armature
+            constraint.subtarget = target_bone_name
+
+        if copy_rotation:
+            constraint = cast(bpy.types.CopyRotationConstraint, root_bone.constraints.new("COPY_ROTATION"))
+            constraint.target = target_armature
+            constraint.subtarget = target_bone_name
+
+        Log.info(f"Attach Main: {armature_object.name}[{root_bone.name}] -> {target_armature.name}[{target_bone_name}]")
+
+    def import_file(self, path: str | Path):
         path = path if isinstance(path, Path) else Path(path)
+        
+        if path.suffix.lower() == '.json':
+            return self.import_mesh_asset(path)
+            
         Log.time_start(f"Import {path}")
 
         with path.open("rb") as file:
@@ -255,12 +317,111 @@ class UEFormatImport:
 
         Log.time_end(f"Import {path}")
         return obj
+    
+    def import_mesh_asset(self, path: Path) -> tuple:
+        Log.time_start(f"Import MeshAsset {path.name}")
+        
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+        if isinstance(data, list) and len(data) > 0:
+            props = data[0].get("Properties", {})
+        else:
+            props = data.get("Properties", {})
+
+        content_dir = path.parent
+        for p in path.parents:
+            if p.name.lower() == "content":
+                content_dir = p
+                break
+                
+        def resolve_uemodel(obj_path: str, obj_name: str) -> Path | None:
+            if "'" in obj_name:
+                obj_name = obj_name.split("'")[1]
+            
+            if obj_path:
+                clean_path = obj_path.split('.')[0]
+                if clean_path.startswith("/Game/"):
+                    clean_path = clean_path[6:]
+                target = content_dir / f"{clean_path}.uemodel"
+                if target.exists():
+                    return target
+                    
+            for file_path in content_dir.rglob(f"{obj_name}.uemodel"):
+                return file_path
+                
+            return None
+
+        main_mesh_data = props.get("FashionMeshData", {}).get("CharacterMesh", {})
+        main_path = resolve_uemodel(main_mesh_data.get("ObjectPath", ""), main_mesh_data.get("ObjectName", ""))
+        
+        main_armature = None
+        if main_path:
+            orig_attach = getattr(self.options, "attach_main", False)
+            self.options.attach_main = False 
+            
+            res = self.import_file(main_path)
+            main_armature = res[0] if isinstance(res, tuple) else res
+            
+            self.options.attach_main = orig_attach
+        else:
+            Log.warn(f"MeshAsset: Cannot resolve main mesh {main_mesh_data.get('ObjectName')}")
+            return None, None
+
+        if main_armature and main_armature.type == 'ARMATURE':
+            attached_data = props.get("ArrayFashionAttachedMeshData", [])
+            for item in attached_data:
+                char_mesh = item.get("CharacterMesh", {})
+                att_path = resolve_uemodel(char_mesh.get("ObjectPath", ""), char_mesh.get("ObjectName", ""))
+                socket_name = item.get("SocketName", "")
+                
+                if att_path:
+                    orig_attach = getattr(self.options, "attach_main", False)
+                    self.options.attach_main = False
+                    
+                    res = self.import_file(att_path)
+                    att_armature = res[0] if isinstance(res, tuple) else res
+                    
+                    self.options.attach_main = orig_attach
+                    
+                    if att_armature and att_armature.type == 'ARMATURE':
+                        root_bone_name = getattr(self.options, "attach_root_bone", "position")
+                        att_pose_bones = att_armature.pose.bones
+                        
+                        root_bone = att_pose_bones.get(root_bone_name)
+                        if not root_bone and len(att_pose_bones) > 0:
+                            root_bone = att_pose_bones[0]
+                            
+                        if root_bone and socket_name in main_armature.pose.bones:
+                            do_loc = getattr(self.options, "attach_copy_location", False)
+                            do_rot = getattr(self.options, "attach_copy_rotation", False)
+                            
+                            if getattr(self.options, "attach_copy_auto", True):
+                                rel_loc = item.get("RelativeLocation", {})
+                                loc_is_zero = all(abs(rel_loc.get(k, 0.0)) < 0.001 for k in ("X", "Y", "Z"))
+                                do_loc = loc_is_zero
+                                
+                                rel_rot = item.get("RelativeRotation", {})
+                                rot_is_zero = all(abs(rel_rot.get(k, 0.0)) < 0.001 for k in ("Pitch", "Yaw", "Roll"))
+                                do_rot = rot_is_zero
+                            
+                            if do_loc:
+                                const_loc = root_bone.constraints.new('COPY_LOCATION')
+                                const_loc.target = main_armature
+                                const_loc.subtarget = socket_name
+                            if do_rot:
+                                const_rot = root_bone.constraints.new('COPY_ROTATION')
+                                const_rot.target = main_armature
+                                const_rot.subtarget = socket_name
+
+        Log.time_end(f"Import MeshAsset {path.name}")
+        return main_armature, None
 
     def import_data(self, data: bytes, file_path: Path = None) -> Object | Action:
         with FArchiveReader(data) as ar:
             return self.import_data_by_reader(ar, file_path=file_path)
 
-    def import_data_by_reader(self, ar: FArchiveReader, file_path: Path = None) -> Object | Action:
+    def _parse_header(self, ar: FArchiveReader) -> tuple[dict, FArchiveReader]:
         magic = ar.read_string(len(MAGIC))
         if magic != MAGIC:
             msg = "Invalid magic"
@@ -272,8 +433,12 @@ class UEFormatImport:
             msg = f"File Version {file_version} is not supported for this version of the importer."
             Log.error(msg)
             raise ValueError(msg)
-            
+
         object_name = ar.read_fstring()
+        object_path = ""
+        if file_version >= EUEFormatVersion.AttributeFormatRestructure:
+            object_path = ar.read_fstring()
+
         Log.info(f"Importing {object_name}")
 
         read_archive = ar
@@ -296,28 +461,54 @@ class UEFormatImport:
                 raise ValueError(msg)
 
         read_archive.file_version = file_version
-        read_archive.metadata["scale"] = self.options.scale_factor
 
+        header = {
+            "identifier": identifier,
+            "file_version": file_version,
+            "object_name": object_name,
+            "object_path": object_path,
+        }
+        return header, read_archive
+
+    def _parse_body(self, header: dict, ar: FArchiveReader):
+        if header["file_version"] >= EUEFormatVersion.AttributeFormatRestructure:
+            from . import deserialize as parser
+        else:
+            from . import legacy as parser
+
+        identifier = header["identifier"]
         if identifier == MODEL_IDENTIFIER:
-            return self.import_uemodel_data(read_archive, object_name, file_path)
+            return parser.read_model(ar)
         if identifier == ANIM_IDENTIFIER:
-            return self.import_ueanim_data(read_archive, object_name, file_path=file_path)
+            return parser.read_anim(ar)
         if identifier == POSE_IDENTIFIER:
-            return self.import_uepose_data(read_archive, object_name)
+            return parser.read_pose(ar)
 
         msg = f"Unknown identifier: {identifier}"
+        Log.error(msg)
+        raise ValueError(msg)
+
+    def import_data_by_reader(self, ar: FArchiveReader, file_path: Path = None) -> Object | Action:
+        header, body = self._parse_header(ar)
+        dto = self._parse_body(header, body)
+        to_blender_space(dto, header["file_version"], self.options.scale_factor)
+
+        if header["identifier"] == MODEL_IDENTIFIER:
+            return self.import_uemodel_data(dto, header["object_name"], file_path)
+        if header["identifier"] == ANIM_IDENTIFIER:
+            return self.import_ueanim_data(dto, header["object_name"], file_path=file_path)
+        if header["identifier"] == POSE_IDENTIFIER:
+            return self.import_uepose_data(dto, header["object_name"])
+
+        msg = f"Unknown identifier: {header['identifier']}"
         Log.error(msg)
         raise ValueError
 
 
-    def import_uemodel_data(self, ar: FArchiveReader, name: str, file_path: Path = None) -> tuple[bpy.types.Object, UEModel]:
+    def import_uemodel_data(self, dto: ModelDto, name: str, file_path: Path = None) -> tuple[bpy.types.Object, ModelDto]:
         assert isinstance(self.options, UEModelOptions)
 
-        data: UEModel
-        if ar.file_version >= EUEFormatVersion.LevelOfDetailFormatRestructure:
-            data = UEModel.from_archive(ar)
-        else:
-            data = UEModel.from_archive_legacy(ar)
+        data = dto
 
         if getattr(self.options, "search_textures", False) and file_path:
             search_dir = file_path.parent
@@ -461,13 +652,14 @@ class UEFormatImport:
                 for bone_ in data.skeleton.bones:
                     bone_pos = Vector(bone_.position)
                     bone_rot = Quaternion((bone_.rotation[3], bone_.rotation[0], bone_.rotation[1], bone_.rotation[2]))
+                    bone_scale = Vector(bone_.scale) if getattr(bone_, "scale", None) is not None else Vector((1.0, 1.0, 1.0))
 
                     edit_bone = edit_bones.new(bone_.name)
                     edit_bone["orig_loc"] = bone_pos
                     edit_bone["orig_quat"] = bone_rot.conjugated()
                     edit_bone.length = self.options.bone_length * self.options.scale_factor
 
-                    bone_matrix = Matrix.Translation(bone_pos) @ bone_rot.to_matrix().to_4x4()
+                    bone_matrix = Matrix.LocRotScale(bone_pos, bone_rot, bone_scale)
 
                     if bone_.parent_index >= 0:
                         parent_bone = cast(EditBone | None, edit_bones.get(data.skeleton.bones[bone_.parent_index].name))
@@ -504,52 +696,11 @@ class UEFormatImport:
             if data.skeleton.bones and self.options.reorient_bones:
                 bpy.ops.object.mode_set(mode="EDIT")
 
-                for bone in armature_data.edit_bones:
-                    bone: EditBone
-                    if bone.get("is_socket"):
-                        continue
-
-                    children = []
-                    for child in bone.children:
-                        if child.get("is_socket"):
-                            continue
-                        children.append(child)
-
-                    if len(children) == 0 and bone.parent is None:
-                        continue
-
-                    target_length = bone.length
-                    if len(children) == 0:
-                        target_rotation = Vector(bone.parent["reorient_direction"])
-                        bone["reorient_direction"] = target_rotation
-                    else:
-                        avg_child_pos = Vector()
-                        avg_child_length = 0.0
-                        allowed_children = None
-                        if self.options.allowed_reorient_children is not None:
-                            allowed_children = self.options.allowed_reorient_children.get(bone.name)
-                            
-                        for child in children:
-                            if allowed_children is not None and child.name not in allowed_children:
-                                continue
-                            pos = Vector(child["orig_loc"])
-                            avg_child_pos += pos
-                            avg_child_length += pos.length
-
-                        avg_child_pos /= len(children)
-                        avg_child_length /= len(children)
-
-                        target_rotation = make_axis_vector(avg_child_pos)
-                        bone["reorient_direction"] = target_rotation
-
-                        target_length = avg_child_length
-
-                    post_quat = Vector((0, 1, 0)).rotation_difference(target_rotation)
-                    bone.matrix @= post_quat.to_matrix().to_4x4()
-                    bone.length = max(0.01, target_length)
-
-                    post_quat.rotate(Quaternion(bone["orig_quat"]).conjugated())
-                    bone["post_quat"] = post_quat
+                reorient_bones(
+                    armature_data,
+                    bone_length=self.options.bone_length * self.options.scale_factor,
+                    allowed_reorient_children=self.options.allowed_reorient_children,
+                )
 
                 bpy.ops.object.mode_set(mode="OBJECT")
 
@@ -678,6 +829,9 @@ class UEFormatImport:
 
                 bpy.ops.object.mode_set(mode="OBJECT")
 
+                if getattr(self.options, "attach_main", False):
+                    self._apply_attach_main(armature_object, file_path)
+
         # collision
         if self.options.import_collision and data.collisions:
             for index, collision in enumerate(data.collisions):
@@ -693,10 +847,10 @@ class UEFormatImport:
 
         return return_object, data
 
-    def import_ueanim_data(self, ar: FArchiveReader, name: str, file_path: Path = None) -> tuple[bpy.types.Action, UEAnim]:
+    def import_ueanim_data(self, dto: AnimDto, name: str, file_path: Path = None) -> tuple[bpy.types.Action, AnimDto]:
         assert isinstance(self.options, UEAnimOptions)
 
-        data = UEAnim.from_archive(ar)
+        data = dto
         action = bpy.data.actions.new(name=name)
 
         armature = self.options.override_skeleton or get_active_armature()
@@ -807,7 +961,7 @@ class UEFormatImport:
                 loc_curves = create_fcurves("location", 3, len(track.position_keys), bone)
                 scale_curves = create_fcurves("scale", 3, len(track.scale_keys), bone)
                 for index, key in enumerate(track.position_keys):
-                    pos = key.get_vector()
+                    pos = Vector(key.value)
                     pos -= orig_loc
                     pos.rotate(post_quat.conjugated())
                     add_key(loc_curves, pos, index, key.frame)
@@ -817,7 +971,7 @@ class UEFormatImport:
 
             rot_curves = create_fcurves("rotation_quaternion", 4, len(track.rotation_keys), bone)
             for index, key in enumerate(track.rotation_keys):
-                p_quat = key.get_quat().conjugated()
+                p_quat = Quaternion((key.value[3], key.value[0], key.value[1], key.value[2])).conjugated()
                 q = post_quat.copy()
                 q.rotate(orig_quat)
                 quat = q
@@ -863,10 +1017,10 @@ class UEFormatImport:
 
         return action, data
 
-    def import_uepose_data(self, ar: FArchiveReader, name: str):
+    def import_uepose_data(self, dto: PoseDto, name: str):
         assert isinstance(self.options, UEPoseOptions)
-        
-        data = UEPose.from_archive(ar)
+
+        data = dto
         selected_armature = self.options.override_skeleton or get_active_armature()
         assert isinstance(selected_armature, bpy.types.Object)
         

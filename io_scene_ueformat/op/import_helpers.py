@@ -40,10 +40,10 @@ class UFImportBase(Operator, ImportHelper, Generic[T]):
 class UFImportUEModel(UFImportBase):
     bl_idname = "uf.import_uemodel"
     bl_label = "Import Model"
-    bl_description = "Import Model"
+    bl_description = "Import Model or MeshAsset JSON"
 
-    filename_ext = ".uemodel"
-    filter_glob: StringProperty(default="*.uemodel", options={"HIDDEN"}, maxlen=255)
+    filename_ext = ""
+    filter_glob: StringProperty(default="*.uemodel;*.json", options={"HIDDEN"}, maxlen=255)
 
     options_class = UEModelOptions
 

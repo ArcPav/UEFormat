@@ -1,4 +1,5 @@
 .idea
 Blender/zstd/*
 __pycache__
+*.json
 /Unreal/UEFormat/Intermediate

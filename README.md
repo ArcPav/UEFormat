@@ -2,7 +2,7 @@
 
 # UEFormat Blender Plugin
 
-[![Blender](https://img.shields.io/badge/Blender-3.2--3.6-blue?logo=blender&logoColor=white&color=orange)](https://www.blender.org/download/)
+[![Blender](https://img.shields.io/badge/Blender-3.6-blue?logo=blender&logoColor=white&color=orange)](https://www.blender.org/download/)
 
 </div>
 

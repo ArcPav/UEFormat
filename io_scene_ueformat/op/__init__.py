@@ -2,6 +2,7 @@ import bpy
 from bpy.props import PointerProperty
 from bpy.types import Context, Menu, Scene
 
+from .bone_ops import UF_OT_ResetBoneOrientation
 from .import_helpers import UFImportUEAnim, UFImportUEModel, UFImportUEPose
 from .panels import UEFORMAT_PT_Panel
 from .settings import UFSettings, UF_OT_SaveDefaults, UF_OT_RestoreDefaults
@@ -13,7 +14,8 @@ operators = [
     UFImportUEPose, 
     UFSettings, 
     UF_OT_SaveDefaults, 
-    UF_OT_RestoreDefaults
+    UF_OT_RestoreDefaults,
+    UF_OT_ResetBoneOrientation,
 ]
 
 def draw_import_menu(self: Menu, context: Context) -> None:  # noqa: ARG001
