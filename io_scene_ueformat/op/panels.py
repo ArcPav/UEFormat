@@ -6,6 +6,7 @@ from bpy.types import Context, Operator, Panel
 
 from ..importer.ab_json import extract_ab_target_bones, find_matching_ab_json
 from ..typing import UFormatContext, UFSettings
+from .import_queue import draw_attach_mesh_selector, draw_queue_box
 
 
 class UEFORMAT_PT_Panel(Panel):  # noqa: N801
@@ -22,6 +23,7 @@ class UEFORMAT_PT_Panel(Panel):  # noqa: N801
 
         self.draw_general_options(self, uf_settings)
         self.draw_model_options(self, uf_settings)
+        draw_queue_box(self.layout, context, show_import_button=True)
         self.draw_anim_options(self, uf_settings)
         self.draw_pose_options(self, uf_settings)
 
@@ -37,38 +39,46 @@ class UEFORMAT_PT_Panel(Panel):  # noqa: N801
             return
 
         col = box.column()
+        fields = draw_attach_mesh_selector(col, bpy.context, settings)
+
+        body = col.column()
 
         scene = bpy.context.scene
         scene_armatures = [o for o in scene.objects if o.type == "ARMATURE"] if scene else []
 
-        skel_row = col.row()
+        skel_row = body.row()
         skel_row.enabled = len(scene_armatures) > 0
-        skel_row.prop(settings, "attach_skeleton")
+        skel_row.prop(fields, "attach_skeleton")
+
+        try:
+            skeleton_choice = fields.attach_skeleton
+        except (TypeError, ValueError):
+            skeleton_choice = "AUTO"
 
         target_armature = None
-        if settings.attach_skeleton != "AUTO":
-            target_armature = bpy.data.objects.get(settings.attach_skeleton)
+        if skeleton_choice != "AUTO":
+            target_armature = bpy.data.objects.get(skeleton_choice)
         if target_armature is None and scene_armatures:
             target_armature = scene_armatures[0]
 
-        attach_split = col.split(factor=0.3)
+        attach_split = body.split(factor=0.3)
         attach_split.label(text="AttachTo:")
         attach_row = attach_split.row(align=True)
-        attach_row.prop(settings, "attach_root_bone", text="")
-        
+        attach_row.prop(fields, "attach_root_bone", text="")
+
         if target_armature is not None:
-            attach_row.prop_search(settings, "attach_target_bone", target_armature.data, "bones", text="")
+            attach_row.prop_search(fields, "attach_target_bone", target_armature.data, "bones", text="")
         else:
-            attach_row.prop(settings, "attach_target_bone", text="")
+            attach_row.prop(fields, "attach_target_bone", text="")
 
-        copy_row = col.row(align=True)
+        copy_row = body.row(align=True)
         copy_row.label(text="Copy:")
-        copy_row.prop(settings, "attach_copy_auto")
-        copy_row.prop(settings, "attach_copy_location")
-        copy_row.prop(settings, "attach_copy_rotation")
+        copy_row.prop(fields, "attach_copy_auto")
+        copy_row.prop(fields, "attach_copy_location")
+        copy_row.prop(fields, "attach_copy_rotation")
 
-        if not settings.attach_copy_location and not settings.attach_copy_rotation:
-            col.label(text="Location/Rotate Unchecked", icon="ERROR")
+        if not fields.attach_copy_location and not fields.attach_copy_rotation:
+            body.label(text="Location/Rotate Unchecked", icon="ERROR")
 
     @staticmethod
     def draw_general_options(obj: Panel | Operator, settings: UFSettings) -> None:

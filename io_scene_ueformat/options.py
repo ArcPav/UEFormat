@@ -44,6 +44,7 @@ class UEModelOptions(UEFormatOptions):
     attach_skeleton: str = "AUTO"
     attach_root_bone: str = "position"
     attach_target_bone: str = "auto"
+    attach_copy_auto: bool = True
     attach_copy_location: bool = True
     attach_copy_rotation: bool = False
 

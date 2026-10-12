@@ -5,6 +5,7 @@ from bpy.props import CollectionProperty, StringProperty
 from bpy.types import Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper
 
+from .import_queue import draw_queue_box, import_model_paths
 from .panels import UEFORMAT_PT_Panel
 from ..importer.logic import UEFormatImport
 from ..options import UEAnimOptions, UEFormatOptions, UEModelOptions, UEPoseOptions
@@ -47,7 +48,14 @@ class UFImportUEModel(UFImportBase):
 
     options_class = UEModelOptions
 
+    def execute(self, context: UFormatContext) -> set[str]:
+        options = self.options_class.from_settings(context.scene.uf_settings)
+        directory = Path(self.directory)
+        selected = [directory / file.name for file in self.files]
+        return import_model_paths(self, context, options, selected)
+
     def draw(self, context: UFormatContext) -> None:
+        draw_queue_box(self.layout, context)
         UEFORMAT_PT_Panel.draw_general_options(self, context.scene.uf_settings)
         UEFORMAT_PT_Panel.draw_model_options(
             self,

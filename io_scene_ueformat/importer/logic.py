@@ -106,6 +106,24 @@ class UEFormatImport:
             
         return []
 
+    _PLACEHOLDER_TEXTURE_RE = re.compile(r"^(default|t_linear_|t_srgb_)", re.IGNORECASE)
+
+    @staticmethod
+    def _texture_ref_name(ref) -> str | None:
+        path = None
+        if isinstance(ref, str):
+            path = ref
+        elif isinstance(ref, dict):
+            path = ref.get("ObjectPath") or ref.get("AssetPathName")
+            if not path:
+                obj_name = ref.get("ObjectName") or ""
+                m = re.search(r"'([^']+)'", obj_name)
+                path = m.group(1) if m else obj_name
+        if not path or not isinstance(path, str):
+            return None
+        name = path.split("/")[-1].split(".")[0].strip("'\" ")
+        return name or None
+
     def _parse_material_info(self, file_path: str):
         file_path_lower = file_path.lower()
         textures = {'base_name': None, 'normal_name': None}
@@ -114,33 +132,50 @@ class UEFormatImport:
 
         try:
             if file_path_lower.endswith('.json'):
-                with open(file_path, 'r', encoding='utf-8') as f:
+                with open(file_path, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
-                
-                tex_dict = data.get('Textures', {})
-                params_dict = data.get('Parameters', {})
-                
+                if not isinstance(data, dict):
+                    raise ValueError("unexpected material json layout")
+
+                tex_dict = data.get('Textures') or {}
+                if not isinstance(tex_dict, dict):
+                    tex_dict = {}
+                nested = data.get('Parameters')
+                params_dict = {**data, **nested} if isinstance(nested, dict) else data
+
+                def usable(ref):
+                    name = self._texture_ref_name(ref)
+                    if name and not self._PLACEHOLDER_TEXTURE_RE.match(name):
+                        return name
+                    return None
+
                 for key in ['BaseColor', 'PM_Diffuse', 'Diffuse', 'Albedo', 'BaseMap']:
-                    if key in tex_dict:
-                        textures['base_name'] = tex_dict[key].split('/')[-1].split('.')[0]
+                    name = usable(tex_dict.get(key))
+                    if name:
+                        textures['base_name'] = name
                         break
 
-                for key in tex_dict:
+                for key, ref in tex_dict.items():
                     if re.match(r"^No[rmalpsRMALPS_]+$", key) or 'normal' in key.lower():
-                        textures['normal_name'] = tex_dict[key].split('/')[-1].split('.')[0]
-                        break
-                        
+                        name = usable(ref)
+                        if name:
+                            textures['normal_name'] = name
+                            break
+
+                props = params_dict.get('Properties') or {}
+                overrides = props.get('BasePropertyOverrides') or {}
                 b_mode = params_dict.get('BlendMode', 0)
-                if b_mode == 1 or params_dict.get('Properties', {}).get('BasePropertyOverrides', {}).get('BlendMode') == 'EBlendMode::BLEND_Masked':
+                b_override = str(overrides.get('BlendMode', ''))
+                if b_mode == 1 or b_override.endswith('BLEND_Masked'):
                     blend_mode = 'CLIP'
-                elif params_dict.get('IsTranslucent', False) or b_mode in (2, 3):
+                elif params_dict.get('IsTranslucent', False) or b_mode in (2, 3) \
+                        or b_override.endswith(('BLEND_Translucent', 'BLEND_Additive')):
                     blend_mode = 'BLEND'
-                    
-                overrides = params_dict.get('Properties', {}).get('BasePropertyOverrides', {})
+
                 if 'OpacityMaskClipValue' in overrides:
                     opacity_clip_value = float(overrides['OpacityMaskClipValue'])
-                elif 'OpacityMaskClipValue' in params_dict.get('Properties', {}):
-                    opacity_clip_value = float(params_dict['Properties']['OpacityMaskClipValue'])
+                elif 'OpacityMaskClipValue' in props:
+                    opacity_clip_value = float(props['OpacityMaskClipValue'])
 
         except Exception as e:
             Log.warn(f"Failed to parse material file {file_path}: {e}")
@@ -243,16 +278,10 @@ class UEFormatImport:
         material.show_transparent_back = False
 
     def _apply_attach_main(self, armature_object: bpy.types.Object, file_path: Path | None) -> None:
-        if not file_path:
-            Log.warn("Unable to locate *AB.json")
-            return
-
-        ab_path = find_matching_ab_json(file_path)
-        if ab_path is None:
-            Log.warn(f"No matching *AB.json found")
-            return
-
-        _, target_bones = extract_ab_target_bones(ab_path)
+        target_bone_name = (getattr(self.options, "attach_target_bone", "") or "").strip()
+        if target_bone_name.lower() == "auto":
+            target_bone_name = ""
+        manual_bone = bool(target_bone_name)
 
         skeleton_choice = getattr(self.options, "attach_skeleton", "AUTO") or "AUTO"
         target_armature = None
@@ -265,19 +294,24 @@ class UEFormatImport:
             Log.warn("No Skeleton Found")
             return
 
-        target_bone_name = (getattr(self.options, "attach_target_bone", "") or "").strip()
-        if target_bone_name.lower() == "auto":
-            target_bone_name = ""
-
-        if target_bone_name and target_bone_name not in target_armature.data.bones:
+        if manual_bone and target_bone_name not in target_armature.data.bones:
             Log.warn(f"Attach Main: Manually specified {target_bone_name} do not exist, Back Auto")
             target_bone_name = ""
 
+        ab_path = None
         if not target_bone_name:
+            if not file_path:
+                Log.warn("Unable to locate *AB.json")
+                return
+            ab_path = find_matching_ab_json(file_path)
+            if ab_path is None:
+                Log.warn("No matching *AB.json found, please specify Target Bone manually")
+                return
+            _, target_bones = extract_ab_target_bones(ab_path)
             target_bone_name = next((b for b in target_bones if b in target_armature.data.bones), None)
 
         if not target_bone_name:
-            Log.warn(f"Attach Main: {target_armature.name} Can't find {ab_path.name} Specify bone")
+            Log.warn(f"Attach Main: {target_armature.name} Can't find {ab_path.name if ab_path else 'AB.json'} Specify bone")
             return
 
         root_bone_name = getattr(self.options, "attach_root_bone", "") or "position"
